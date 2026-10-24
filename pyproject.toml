@@ -1,0 +1,21 @@
+[project]
+name = "classroom-api"
+version = "0.1.0"
+description = "AI-agent-friendly CLI for myITS Classroom (Moodle): view courses, list assignments, submit work, verify receipts."
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.47",
+    "beautifulsoup4>=4.12",
+    "mcp>=1.9,<2",
+]
+
+[project.scripts]
+classroom = "classroom_api.cli:main"
+classroom-mcp = "classroom_api.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

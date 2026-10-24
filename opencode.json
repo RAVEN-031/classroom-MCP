@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "classroom": {
+      "type": "local",
+      "enabled": true,
+      "command": ["/home/zee/Projects/classroom_API/.venv/bin/classroom-mcp"]
+    }
+  }
+}
