@@ -110,7 +110,7 @@ short-lived Firefox per invocation (no window unless `--headed`/login).
 - [x] 2. Data layer — rewrite `assign.py` + `submitter.py` onto FirefoxSession page-context calls; no httpx, no cookie files; WIB due dates; EN/ID selector fallbacks. (Recommended task executor category: deep-low)
 - [x] 3. Surfaces — rewrite `service.py`, `cli.py`, `mcp_server.py` around FirefoxSession; pyproject: drop httpx, pin `mcp<2`, keep playwright+bs4. (Recommended task executor category: deep-low)
 - [x] 4. Verify — compileall; CLI no-session error path (clean JSON, exit != 0); MCP stdio smoke (initialize → tools/list → status); write project `opencode.json` mcp entry. (Recommended task executor category: quick)
-- [ ] 5. Live calibration (needs user present) — user logs in once in tool's Firefox window; verify courses/assignments JSON; one low-stakes submit to calibrate selectors, performed ONLY on a past, finished course the user explicitly designates as safe (never an active course). (Recommended task executor category: deep-low)
+- [~] 5. Live calibration (needs user present) — GAP: awaiting the user's one-time login (`classroom login`) and their designation of a past, finished course for the low-stakes submit. All code paths verified up to the login wall (typed errors, MCP handshake, guard rails).
 
 ## Final Verification Wave
 
