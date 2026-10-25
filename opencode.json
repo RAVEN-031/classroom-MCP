@@ -4,7 +4,7 @@
     "classroom": {
       "type": "local",
       "enabled": true,
-      "command": ["/home/zee/Projects/classroom_API/.venv/bin/classroom-mcp"]
+      "command": ["/home/zee/Projects/classroom_MCP/.venv/bin/classroom-mcp"]
     }
   }
 }
