@@ -26,6 +26,7 @@ service.py            one short-lived FirefoxSession per call, closed afterwards
         ▼
 assign.py             course/assignment data (Moodle AJAX, HTML-scrape fallbacks)
 submitter.py          drives the real mod_assign submission form
+materials.py          course materials/files/links + Moodle file downloads
         │
         ▼
 browser.py            persistent Firefox profile (.firefox-profile/) — the ONLY credential store
@@ -79,6 +80,12 @@ Every command prints **one JSON document** on success. Exit codes: `0` ok · `1`
 .venv/bin/classroom submit --assignment 298204 --file ./a.png --file ./b.png
 .venv/bin/classroom submit --assignment 298204 --text "Answers below..." --note "For the grader"
 
+# course materials — files, folders, and links for one course
+.venv/bin/classroom materials --course 7966
+
+# download a Moodle file URL (fileurl from listings) to a local path
+.venv/bin/classroom download --url <pluginfile-url> --out ./file.pdf   # add --overwrite to replace an existing file
+
 # authoritative server-side status (submitted / draft / not_submitted)
 .venv/bin/classroom verify --assignment 298204
 ```
@@ -111,6 +118,8 @@ Exposed tools:
 | `classroom_assignments` | listings, optional course id / due-within window |
 | `classroom_submit` | files and/or text; verifies server-side before returning ok |
 | `classroom_verify` | authoritative submission state |
+| `classroom_materials` | course materials (files/folders/links) with download URLs |
+| `classroom_download` | download a Moodle file URL to a local path |
 
 Agents should be coachable on exactly one rule: when a tool returns `login_required`, ask the human to run `classroom login` (or call `classroom_login`) and wait — never try to authenticate programmatically.
 
@@ -123,8 +132,8 @@ Agents should be coachable on exactly one rule: when a tool returns `login_requi
 
 ## Current limitations
 
-- **Assignments only** — course *materials* (PDFs, folders, external links) are visible in the web UI but have no CLI/MCP surface yet.
 - **One login session (~8h idle)**; activity keeps it alive, but a long idle means repeating the [first login](#first-login).
+- Materials listings use the Moodle web service (`core_course_get_contents`) when it's enabled, with an automatic HTML-scrape fallback; the HTML path reports names and links but not per-file listings.
 - Moodle's webservice whitelist on this deployment is narrow, so listings fall back to HTML scraping in places — expect the same data but a slightly slower call on some courses.
 - Frankly tuned for the myITS RemUI theme; other Moodle themes may shift button labels (the bilingual label lists cover EN/ID).
 
