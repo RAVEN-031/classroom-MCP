@@ -53,6 +53,8 @@ python3 -m venv .venv
 
 Login is the only step that needs a human: a **visible Firefox window** opens on `classroom.its.ac.id`, and you complete the myITS SSO and approve the Microsoft Authenticator push yourself. The tool waits up to 10 minutes and polls for success.
 
+Before asking you for anything, login tries pressing the SSO/login button on its own. If the SSO provider session is still alive, you're in with zero interaction. If it's dead, you'll be asked to approve the Microsoft push as before (the window notes the click was already attempted).
+
 ```bash
 .venv/bin/classroom login          # browser opens; complete SSO + Microsoft 2FA there
 ```
@@ -89,6 +91,8 @@ Every command prints **one JSON document** on success. Exit codes: `0` ok · `1`
 # authoritative server-side status (submitted / draft / not_submitted)
 .venv/bin/classroom verify --assignment 298204
 ```
+
+When the web service is unavailable, `materials` falls back to HTML scraping and enriches the listing by fetching each resource/folder module page, so per-file `fileurl`s appear whenever those pages expose them — pipe one into `download --url` and it works end-to-end. Per-file sizes may show as `filesize: null` because the HTML path can't always see them.
 
 `submit --headed` lets you watch the run in a visible browser. `login --headless` exists but is not recommended — the human login needs a window.
 
@@ -133,7 +137,7 @@ Agents should be coachable on exactly one rule: when a tool returns `login_requi
 ## Current limitations
 
 - **One login session (~8h idle)**; activity keeps it alive, but a long idle means repeating the [first login](#first-login).
-- Materials listings use the Moodle web service (`core_course_get_contents`) when it's enabled, with an automatic HTML-scrape fallback; the HTML path reports names and links but not per-file listings.
+- Materials listings use the Moodle web service (`core_course_get_contents`) when it's enabled, with an automatic HTML-scrape fallback; the HTML path enriches its listing from module pages, but per-file sizes may be missing (`filesize: null`).
 - Moodle's webservice whitelist on this deployment is narrow, so listings fall back to HTML scraping in places — expect the same data but a slightly slower call on some courses.
 - Frankly tuned for the myITS RemUI theme; other Moodle themes may shift button labels (the bilingual label lists cover EN/ID).
 
