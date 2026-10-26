@@ -70,6 +70,14 @@ def main(argv: list[str] | None = None) -> int:
     p_verify = sub.add_parser("verify", help="Confirm server-side submission state")
     p_verify.add_argument("--assignment", type=int, required=True)
 
+    p_materials = sub.add_parser("materials", help="List course materials (files/folders/links)")
+    p_materials.add_argument("--course", type=int, required=True, help="Course id")
+
+    p_download = sub.add_parser("download", help="Download a Moodle file URL via the browser session")
+    p_download.add_argument("--url", type=str, required=True, help="Moodle file URL")
+    p_download.add_argument("--out", type=str, required=True, help="Output path")
+    p_download.add_argument("--overwrite", action="store_true", help="Overwrite existing file")
+
     args = parser.parse_args(argv)
 
     try:
@@ -99,5 +107,9 @@ async def _dispatch(args: argparse.Namespace) -> dict[str, Any]:
             )
         case "verify":
             return await service.verify(cmid=args.assignment)
+        case "materials":
+            return await service.materials(course_id=args.course)
+        case "download":
+            return await service.download(fileurl=args.url, out_path=args.out, overwrite=args.overwrite)
         case _:
             raise ClassroomError(f"Unknown command {args.cmd}")

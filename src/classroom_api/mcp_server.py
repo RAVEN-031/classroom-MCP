@@ -104,6 +104,24 @@ async def classroom_verify(cmid: int) -> dict[str, Any]:
         return exc.as_payload()
 
 
+@mcp.tool()
+async def classroom_materials(course_id: int) -> dict[str, Any]:
+    """List a course's materials (files/folders/links) with download URLs. Call classroom_status first; on login_required ask the human to run classroom login."""
+    try:
+        return _payload(await service.materials(course_id=course_id))
+    except err.ClassroomError as exc:
+        return exc.as_payload()
+
+
+@mcp.tool()
+async def classroom_download(fileurl: str, out_path: str, overwrite: bool = False) -> dict[str, Any]:
+    """Download a Moodle file URL (from classroom_materials) to out_path via the browser session. Refuses to overwrite unless overwrite=True."""
+    try:
+        return _payload(await service.download(fileurl=fileurl, out_path=out_path, overwrite=overwrite))
+    except err.ClassroomError as exc:
+        return exc.as_payload()
+
+
 def main() -> None:
     """stdio entrypoint configured in opencode.json as a local MCP server."""
     mcp.run(transport="stdio")

@@ -18,6 +18,8 @@ from typing import Any
 from .assign import filter_due_window, list_assignments, list_courses, submission_status
 from .browser import connect
 from .errors import ClassroomError, LoginRequired, SubmissionError
+from .materials import download as materials_download
+from .materials import list_materials
 
 _LOGIN_TIMEOUT_SECONDS = 600.0
 _LOGIN_POLL_INTERVAL = 2.0
@@ -122,6 +124,24 @@ async def submit(cmid: int, file_paths: list[str] | None = None, text: str | Non
     try:
         result = await _submit(session, cmid=cmid, file_paths=file_paths or [], text=text, note=note)
         return {"ok": True, "cmid": cmid, **result}
+    finally:
+        await session.close()
+
+
+async def materials(course_id: int) -> dict[str, Any]:
+    session = await connect()
+    try:
+        rows = await list_materials(session, course_id)
+        return {"ok": True, "course_id": course_id, "count": len(rows), "materials": rows}
+    finally:
+        await session.close()
+
+
+async def download(fileurl: str, out_path: str, overwrite: bool = False) -> dict[str, Any]:
+    session = await connect()
+    try:
+        result = await materials_download(session, fileurl, out_path, overwrite=overwrite)
+        return {"ok": True, **result}
     finally:
         await session.close()
 
