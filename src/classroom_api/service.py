@@ -16,13 +16,75 @@ import time
 from typing import Any
 
 from .assign import filter_due_window, list_assignments, list_courses, submission_status
-from .browser import connect
+from .browser import BASE_URL, connect
 from .errors import ClassroomError, LoginRequired, SubmissionError
 from .materials import download as materials_download
 from .materials import list_materials
 
 _LOGIN_TIMEOUT_SECONDS = 600.0
 _LOGIN_POLL_INTERVAL = 2.0
+_AUTOCLICK_POLL_SECONDS = 90.0
+
+# SSO auto-click candidates. Structural selectors first (RemUI: structural
+# beats text); bilingual text labels only as a fallback.
+_LOGIN_STRUCTURAL_SELECTORS = (
+    "button[type=submit]",
+    "#loginsubmit",
+    'a[href*="/login/"]',
+    'a[href*="sso"]',
+)
+_LOGIN_TEXT_LABELS = ("Log in", "Login", "MASUK", "Masuk")
+
+
+async def _probe_user_id(session: Any) -> int:
+    """user_id() that never raises: 0 when anonymous or transiently broken.
+
+    ``user_id()`` RAISES ``LoginRequired`` when anonymous (it never returns
+    0 itself); SSO redirect races can also throw transient errors.
+    """
+    try:
+        return await session.user_id()
+    except ClassroomError:
+        return 0
+
+
+async def _sso_autoclick(session: Any) -> bool:
+    """Click-only attempt to (re)start SSO from the login page.
+
+    Ensures the page sits on the Moodle login entry point (never navigating
+    away from an external SSO provider mid-flow), then clicks the first
+    visible/enabled structural match, falling back to text labels. NEVER
+    fills username/password fields. Every step is individually bounded in
+    try/except - a missing button must never crash the login flow.
+    Returns True when a click landed.
+    """
+    page = session.page
+    url = page.url or ""
+    # Only re-navigate when we are on (or blank off) the Moodle site; never
+    # yank the page away from a half-finished external SSO login.
+    if (url.startswith(BASE_URL) or url.startswith("about:")) and "/login/" not in url:
+        try:
+            await page.goto(BASE_URL + "/login/index.php", wait_until="domcontentloaded")
+        except Exception:
+            pass  # stay wherever we are; selectors below may still match
+    for selector in _LOGIN_STRUCTURAL_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            if await locator.is_visible() and await locator.is_enabled():
+                await locator.click(timeout=5000)
+                return True
+        except Exception:
+            continue
+    for label in _LOGIN_TEXT_LABELS:
+        for role in ("button", "link"):
+            try:
+                locator = page.get_by_role(role, name=label).first
+                if await locator.is_visible() and await locator.is_enabled():
+                    await locator.click(timeout=5000)
+                    return True
+            except Exception:
+                continue
+    return False
 
 
 async def _fullname(session: Any) -> str:
@@ -40,35 +102,55 @@ async def _fullname(session: Any) -> str:
 
 
 async def login(headed: bool = True) -> dict[str, Any]:
-    """Open the persistent-profile browser for one-time human login.
+    """Open the persistent-profile browser and log in.
 
-    The human completes myITS SSO + Microsoft Authenticator push inside the
-    tool's own Firefox window. We poll until ``user_id()`` is non-zero.
+    Order of attack: (1) if the profile session is still alive, return
+    immediately with no banner; (2) otherwise attempt a click-only SSO
+    re-authentication - a once-logged-in profile usually comes back on a
+    single click of the login/SSO button (structural selectors first, never
+    any username/password autofill) - and poll ``user_id()`` for
+    ``_AUTOCLICK_POLL_SECONDS``; (3) if that fails (ceiling: the SSO
+    provider session itself is dead, so the click cannot re-authenticate
+    and one human Microsoft Authenticator push is unavoidable), print the
+    human banner and poll up to ``_LOGIN_TIMEOUT_SECONDS`` while the human
+    completes myITS SSO inside the tool's own Firefox window.
     """
     session = await connect(headed=headed)
     try:
-        try:
-            await session.sesskey()  # force the page/window to settle
-        except ClassroomError:
-            pass  # not logged in yet - that is what the human is about to fix
+        user_id = await _probe_user_id(session)
+        if user_id:
+            return {
+                "ok": True,
+                "message": "Already logged in.",
+                "user": {"id": user_id, "fullname": await _fullname(session)},
+            }
+        autoclick_note = ""
+        if await _sso_autoclick(session):
+            deadline = time.monotonic() + _AUTOCLICK_POLL_SECONDS
+            while not user_id and time.monotonic() < deadline:
+                await asyncio.sleep(_LOGIN_POLL_INTERVAL)
+                user_id = await _probe_user_id(session)
+            if user_id:
+                return {
+                    "ok": True,
+                    "message": "Login complete via SSO button click; no human step needed.",
+                    "user": {"id": user_id, "fullname": await _fullname(session)},
+                }
+            autoclick_note = "\n(Automatic SSO button click was already attempted and did not re-authenticate.)"
         print(
             "A Firefox window is open on classroom.its.ac.id.\n"
-            "Complete myITS SSO and approve the Microsoft Authenticator push there.\n"
+            "Complete myITS SSO and approve the Microsoft Authenticator push there."
+            f"{autoclick_note}\n"
             f"Waiting up to {_LOGIN_TIMEOUT_SECONDS:.0f}s ...",
             file=sys.stderr,
             flush=True,
         )
         deadline = time.monotonic() + _LOGIN_TIMEOUT_SECONDS
-        while True:
-            try:
-                user_id = await session.user_id()
-            except LoginRequired:
-                user_id = 0
-            if user_id:
-                break
+        while not user_id:
             if time.monotonic() >= deadline:
                 raise LoginRequired("Timed out waiting for human login in the browser window.")
             await asyncio.sleep(_LOGIN_POLL_INTERVAL)
+            user_id = await _probe_user_id(session)
         fullname = await _fullname(session)
         return {
             "ok": True,
