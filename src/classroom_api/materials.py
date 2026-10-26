@@ -6,7 +6,11 @@ proven live 2026-10-26 across all enrolled courses), so on ``MoodleError``
 we fall back to scraping ``/course/view.php`` HTML — the fallback is the
 path that answers in practice. Each returned dict carries ``"source"``:
 ``"webservice"`` or ``"html"`` — callers can tell which path answered. The
-HTML fallback cannot see file listings, so its ``contents`` are always empty.
+HTML fallback then enriches ``resource``/``folder`` entries by fetching each
+module's own page and lifting out pluginfile URLs (RemUI resource pages
+sometimes JS-redirect instead of linking). Enrichment fetches ONE page per
+module, so it is capped at ``_ENRICH_PAGE_CAP`` (~25) module pages per call;
+remaining entries keep ``contents: []``.
 
 Credentials never leave the browser: cookies are never read, copied, or
 printed, and no sesskey appears in any returned dict or error message. No
@@ -15,18 +19,32 @@ dates are handled here, so there is no WIB/timezone conversion either.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import re
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from bs4 import BeautifulSoup
 
 from .browser import BASE_URL, FirefoxSession
-from .errors import MoodleError
+from .errors import ClassroomError, LoginRequired, MoodleError
 
 _MATERIAL_MODNAMES = ("resource", "folder", "url")
+
+# Hard bound on module pages fetched per list_materials() call (enrichment
+# is page-fetch-per-module; a big course must not turn the listing into a
+# crawl). Entries past the cap keep contents: [].
+_ENRICH_PAGE_CAP = 25
+_ENRICH_FETCH_TIMEOUT = 20.0
+
+# JS-redirect patterns on RemUI resource pages: location.replace('...') and
+# window.location = '...' pointing at a pluginfile.php URL.
+_PLUGINFILE_JS_RE = re.compile(
+    r"""location(?:\.replace\s*\(\s*|\.href\s*=\s*|\s*=\s*)["']([^"']*pluginfile\.php[^"']*)["']""",
+    re.IGNORECASE,
+)
 
 # In-page fetch returning BYTES as base64 (page.evaluate cannot return raw
 # bytes). Same credential discipline as browser.py's _FETCH_HTML_JS.
@@ -131,6 +149,64 @@ def _scrape_materials_html(html: str) -> list[dict]:
     return list(seen.values())
 
 
+def _filename_from_url(fileurl: str) -> str:
+    """Last path segment of a pluginfile URL, URL-decoded."""
+    path = urlparse(fileurl).path
+    return unquote(path.rsplit("/", 1)[-1]) if path else ""
+
+
+def _pluginfile_urls_from_html(html: str) -> list[str]:
+    """pluginfile.php URLs from a module page: anchors first, then
+    window.location-style JS redirects (RemUI resource pages sometimes
+    JS-redirect instead of linking). Order-preserving dedup."""
+    urls: list[str] = []
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=True):
+        if "pluginfile.php" in a["href"]:
+            urls.append(a["href"])
+    for match in _PLUGINFILE_JS_RE.finditer(html):
+        urls.append(match.group(1))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            unique.append(u)
+    return unique
+
+
+async def _enrich_contents(s: FirefoxSession, materials: list[dict]) -> None:
+    """Populate ``contents`` of scraped resource/folder entries in place.
+
+    Fetches each module's own page (sequential, ~20s bound each) and lifts
+    out pluginfile URLs. A module-page failure leaves ``contents: []``;
+    ``LoginRequired`` propagates. Stops after ``_ENRICH_PAGE_CAP`` module
+    pages — remaining entries keep ``contents: []``.
+    """
+    fetched = 0
+    for mod in materials:
+        if fetched >= _ENRICH_PAGE_CAP:
+            break
+        if mod.get("modname") not in ("resource", "folder"):
+            continue
+        path = f"/mod/{mod['modname']}/view.php?id={mod.get('id', 0)}"
+        try:
+            html = await asyncio.wait_for(s.fetch_html(path), timeout=_ENRICH_FETCH_TIMEOUT)
+        except LoginRequired:
+            raise
+        except (ClassroomError, asyncio.TimeoutError):
+            continue
+        fetched += 1
+        mod["contents"] = [
+            {
+                "filename": _filename_from_url(fileurl) or "file",
+                "filesize": None,
+                "fileurl": fileurl,
+            }
+            for fileurl in _pluginfile_urls_from_html(html)
+        ]
+
+
 async def list_materials(s: FirefoxSession, course_id: int) -> list[dict]:
     """All resource/folder/url activities of a course.
 
@@ -147,7 +223,9 @@ async def list_materials(s: FirefoxSession, course_id: int) -> list[dict]:
     except MoodleError:
         pass
     html = await s.fetch_html(f"/course/view.php?id={course_id}")
-    return _scrape_materials_html(html)
+    materials = _scrape_materials_html(html)
+    await _enrich_contents(s, materials)
+    return materials
 
 
 async def download(
