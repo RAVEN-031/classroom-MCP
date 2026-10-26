@@ -6,11 +6,12 @@ proven live 2026-10-26 across all enrolled courses), so on ``MoodleError``
 we fall back to scraping ``/course/view.php`` HTML — the fallback is the
 path that answers in practice. Each returned dict carries ``"source"``:
 ``"webservice"`` or ``"html"`` — callers can tell which path answered. The
-HTML fallback then enriches ``resource``/``folder`` entries by fetching each
-module's own page and lifting out pluginfile URLs (RemUI resource pages
-sometimes JS-redirect instead of linking). Enrichment fetches ONE page per
-module, so it is capped at ``_ENRICH_PAGE_CAP`` (~25) module pages per call;
-remaining entries keep ``contents: []``.
+HTML fallback then enriches ``resource``/``folder`` entries: forced-download
+resource pages are resolved via the Playwright download event (the download
+URL IS the pluginfile fileurl; the download is cancelled), while other
+module pages are fetched and pluginfile URLs lifted out of their HTML.
+Enrichment touches at most ``_ENRICH_PAGE_CAP`` (~25) module pages per
+call; remaining entries keep ``contents: []``.
 
 Credentials never leave the browser: cookies are never read, copied, or
 printed, and no sesskey appears in any returned dict or error message. No
@@ -23,6 +24,7 @@ import asyncio
 import base64
 import os
 import re
+import shutil
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -38,6 +40,10 @@ _MATERIAL_MODNAMES = ("resource", "folder", "url")
 # crawl). Entries past the cap keep contents: [].
 _ENRICH_PAGE_CAP = 25
 _ENRICH_FETCH_TIMEOUT = 20.0
+
+# expect_download() takes MILLISECONDS — a separate constant so nobody
+# "simplifies" it back to seconds.
+_DOWNLOAD_WAIT_MS = 30000
 
 # JS-redirect patterns on RemUI resource pages: location.replace('...') and
 # window.location = '...' pointing at a pluginfile.php URL.
@@ -175,13 +181,47 @@ def _pluginfile_urls_from_html(html: str) -> list[str]:
     return unique
 
 
+async def _capture_download_url(s: FirefoxSession, url: str) -> str | None:
+    """pluginfile URL of a forced-download resource page, or None.
+
+    RemUI resource pages for downloadable files do not render HTML: the
+    server answers ``view.php`` with a ``Content-Disposition: attachment``
+    redirect straight to ``pluginfile.php``. ``page.goto`` fires a
+    Playwright download event whose ``url`` IS the file URL; the download
+    is cancelled so the file is never written. ``fetch_html`` cannot be
+    used here — the in-page fetch would pull the whole file into memory.
+    """
+    try:
+        async with s.page.expect_download(timeout=_ENRICH_FETCH_TIMEOUT * 1000) as dl:
+            try:
+                await s.page.goto(url, wait_until="commit")
+            except Exception:
+                # "Download is starting" — the expected shape; the page
+                # never commits and stays where it was.
+                pass
+        download = await dl.value
+        fileurl = download.url
+        try:
+            await download.cancel()
+        except Exception:
+            pass
+        return fileurl if "pluginfile.php" in fileurl else None
+    except ClassroomError:
+        raise
+    except Exception:
+        return None
+
+
 async def _enrich_contents(s: FirefoxSession, materials: list[dict]) -> None:
     """Populate ``contents`` of scraped resource/folder entries in place.
 
-    Fetches each module's own page (sequential, ~20s bound each) and lifts
-    out pluginfile URLs. A module-page failure leaves ``contents: []``;
-    ``LoginRequired`` propagates. Stops after ``_ENRICH_PAGE_CAP`` module
-    pages — remaining entries keep ``contents: []``.
+    ``resource`` pages that force a download are resolved via the download
+    event (``_capture_download_url``); everything else is fetched via
+    ``fetch_html`` (one page per module, ~20s bound) and pluginfile URLs
+    are lifted out of the HTML. A module-page failure leaves
+    ``contents: []``; ``LoginRequired`` propagates. Stops after
+    ``_ENRICH_PAGE_CAP`` module pages — remaining entries keep
+    ``contents: []``.
     """
     fetched = 0
     for mod in materials:
@@ -190,12 +230,19 @@ async def _enrich_contents(s: FirefoxSession, materials: list[dict]) -> None:
         if mod.get("modname") not in ("resource", "folder"):
             continue
         path = f"/mod/{mod['modname']}/view.php?id={mod.get('id', 0)}"
-        try:
-            html = await asyncio.wait_for(s.fetch_html(path), timeout=_ENRICH_FETCH_TIMEOUT)
-        except LoginRequired:
-            raise
-        except (ClassroomError, asyncio.TimeoutError):
-            continue
+        fileurls: list[str] = []
+        if mod["modname"] == "resource":
+            fileurl = await _capture_download_url(s, BASE_URL + path)
+            if fileurl:
+                fileurls.append(fileurl)
+        if not fileurls:
+            try:
+                html = await asyncio.wait_for(s.fetch_html(path), timeout=_ENRICH_FETCH_TIMEOUT)
+            except LoginRequired:
+                raise
+            except (ClassroomError, asyncio.TimeoutError):
+                continue
+            fileurls = _pluginfile_urls_from_html(html)
         fetched += 1
         mod["contents"] = [
             {
@@ -203,7 +250,7 @@ async def _enrich_contents(s: FirefoxSession, materials: list[dict]) -> None:
                 "filesize": None,
                 "fileurl": fileurl,
             }
-            for fileurl in _pluginfile_urls_from_html(html)
+            for fileurl in fileurls
         ]
 
 
@@ -234,7 +281,14 @@ async def download(
     out_path: str,
     overwrite: bool = False,
 ) -> dict:
-    """Download a Moodle file URL in-page (browser cookies) to ``out_path``.
+    """Download a Moodle file URL (browser cookies) to ``out_path``.
+
+    Forced-attachment files go through Firefox's own download machinery
+    (``expect_download`` + ``save_as``) — the in-page fetch path cannot
+    carry large bodies (Firefox caps fetch response bodies, e.g. a 100 MB
+    textbook PDF fails with "Content-Length header ... exceeds response
+    Body"). Files that render inline (no download event) fall back to the
+    in-page fetch -> base64 path.
 
     Refuses to overwrite an existing file unless ``overwrite`` is True.
     Returns ``{"path", "size", "url"}``.
@@ -244,6 +298,22 @@ async def download(
             f"download: refusing to overwrite existing file '{out_path}'",
             hint="Pass overwrite=True to replace it.",
         )
+    try:
+        async with s.page.expect_download(timeout=_DOWNLOAD_WAIT_MS) as dl:
+            try:
+                await s.page.goto(fileurl, wait_until="commit")
+            except Exception:
+                pass
+        download = await dl.value
+        # save_as() alone can copy before the body lands (0-byte file);
+        # path() awaits completion first.
+        tmp = await download.path()
+        shutil.copyfile(tmp, out_path)
+        return {"path": out_path, "size": os.path.getsize(out_path), "url": fileurl}
+    except ClassroomError:
+        raise
+    except Exception:
+        pass
     result = await s.page.evaluate(_FETCH_BYTES_JS, {"url": fileurl})
     if result.get("error"):
         raise MoodleError(f"download({fileurl}) failed: {result['error']}")
