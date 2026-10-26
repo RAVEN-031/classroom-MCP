@@ -141,7 +141,7 @@ class FirefoxSession:
         """One AJAX attempt; returns ``body[0]`` or raises MoodleError."""
         sk = await self.sesskey()
         url = f"{BASE_URL}/lib/ajax/service.php?sesskey={sk}&info={method}"
-        body = json.dumps([{"index": 0, "method": method, "args": args}])
+        body = json.dumps([{"index": 0, "methodname": method, "args": args}])
         result = await self.page.evaluate(_AJAX_JS, {"url": url, "body": body})
         if result.get("error") or result.get("body") is None or result.get("status", 0) >= 400:
             raise MoodleError(
@@ -156,7 +156,18 @@ class FirefoxSession:
             entries = payload.get("body") or []
         if not entries:
             raise MoodleError(f"Moodle AJAX {method} returned an empty batch.")
-        return entries[0]
+        entry = entries[0]
+        if isinstance(entry, dict) and entry.get("error"):
+            # Sesskey/session errors must still reach ajax()'s retry wrapper
+            # as a returned dict; any other error surfaces here with its
+            # errorcode instead of being masked as an empty batch.
+            message = str(entry.get("exception") or entry.get("message") or entry)
+            if not ("sesskey" in message.lower() or "session" in message.lower()):
+                raise MoodleError(
+                    f"Moodle AJAX {method}: "
+                    f"{entry.get('errorcode') or 'error'}: {message}"
+                )
+        return entry
 
     async def fetch_html(self, path: str) -> str:
         """Fetch an HTML page in-page with same-origin credentials.
