@@ -25,8 +25,14 @@ _LOGIN_TIMEOUT_SECONDS = 600.0
 _LOGIN_POLL_INTERVAL = 2.0
 _AUTOCLICK_POLL_SECONDS = 90.0
 
-# SSO auto-click candidates. Structural selectors first (RemUI: structural
-# beats text); bilingual text labels only as a fallback.
+# The myITS SSO entry: identity-provider button on the Moodle login page
+# (bare icon link, no text; proven live 2026-10-25). Navigating to the
+# Moodle-hosted /auth/oidc/ endpoint is equivalent to clicking it.
+_SSO_IDP_SELECTOR = "a.login-identityprovider-btn"
+_SSO_IDP_PATH = "/auth/oidc/?source=loginpage"
+
+# Generic login click candidates, LAST RESORT only. Structural selectors
+# first (RemUI: structural beats text); bilingual text labels after that.
 _LOGIN_STRUCTURAL_SELECTORS = (
     "button[type=submit]",
     "#loginsubmit",
@@ -40,33 +46,69 @@ async def _probe_user_id(session: Any) -> int:
     """user_id() that never raises: 0 when anonymous or transiently broken.
 
     ``user_id()`` RAISES ``LoginRequired`` when anonymous (it never returns
-    0 itself); SSO redirect races can also throw transient errors.
+    0 itself); SSO redirect races and a closed browser window also throw,
+    and all of those mean "not logged in (yet)" for the poll loops.
     """
     try:
         return await session.user_id()
-    except ClassroomError:
+    except Exception:
         return 0
 
 
-async def _sso_autoclick(session: Any) -> bool:
-    """Click-only attempt to (re)start SSO from the login page.
+def _browser_closed(session: Any) -> bool:
+    try:
+        return session.page.is_closed()
+    except Exception:
+        return True
 
-    Ensures the page sits on the Moodle login entry point (never navigating
-    away from an external SSO provider mid-flow), then clicks the first
-    visible/enabled structural match, falling back to text labels. NEVER
-    fills username/password fields. Every step is individually bounded in
-    try/except - a missing button must never crash the login flow.
-    Returns True when a click landed.
+
+def _is_target_closed_error(exc: BaseException) -> bool:
+    if type(exc).__name__ == "TargetClosedError":
+        return True
+    text = str(exc).lower()
+    return "target closed" in text or "browser has been closed" in text
+
+
+async def _sso_autoclick(session: Any) -> bool:
+    """Click-only attempt to (re)start myITS SSO from the login page.
+
+    The primary target is the identity-provider button
+    (``a.login-identityprovider-btn``, "Masuk dengan myITS"); if the anchor
+    is missing or invisible, navigating to the Moodle-hosted
+    ``/auth/oidc/?source=loginpage`` entry is the equivalent fallback.
+    Generic login buttons/links are demoted to last resort. Ensures the
+    page sits on the Moodle login entry point (never navigating away from
+    an external SSO provider mid-flow). NEVER fills username/password
+    fields. Every step is individually bounded in try/except - a missing
+    button must never crash the login flow. Returns True when a click or
+    the equivalent navigation landed.
     """
     page = session.page
     url = page.url or ""
     # Only re-navigate when we are on (or blank off) the Moodle site; never
-    # yank the page away from a half-finished external SSO login.
-    if (url.startswith(BASE_URL) or url.startswith("about:")) and "/login/" not in url:
+    # yank the page away from a half-finished SSO/login flow.
+    on_moodle = url.startswith(BASE_URL) or url.startswith("about:")
+    if on_moodle and "/login/" not in url and "/auth/" not in url:
         try:
             await page.goto(BASE_URL + "/login/index.php", wait_until="domcontentloaded")
         except Exception:
             pass  # stay wherever we are; selectors below may still match
+    # 1. The myITS identity-provider button itself.
+    try:
+        locator = page.locator(_SSO_IDP_SELECTOR).first
+        if await locator.is_visible() and await locator.is_enabled():
+            await locator.click(timeout=5000)
+            return True
+    except Exception:
+        pass
+    # 2. Equivalent: goto the Moodle-hosted /auth/oidc/ SSO entry.
+    if on_moodle and "/auth/" not in (page.url or ""):
+        try:
+            await page.goto(BASE_URL + _SSO_IDP_PATH, wait_until="domcontentloaded")
+            return True
+        except Exception:
+            pass
+    # 3. Last resort: generic login buttons/links.
     for selector in _LOGIN_STRUCTURAL_SELECTORS:
         try:
             locator = page.locator(selector).first
@@ -106,14 +148,17 @@ async def login(headed: bool = True) -> dict[str, Any]:
 
     Order of attack: (1) if the profile session is still alive, return
     immediately with no banner; (2) otherwise attempt a click-only SSO
-    re-authentication - a once-logged-in profile usually comes back on a
-    single click of the login/SSO button (structural selectors first, never
-    any username/password autofill) - and poll ``user_id()`` for
-    ``_AUTOCLICK_POLL_SECONDS``; (3) if that fails (ceiling: the SSO
-    provider session itself is dead, so the click cannot re-authenticate
-    and one human Microsoft Authenticator push is unavoidable), print the
-    human banner and poll up to ``_LOGIN_TIMEOUT_SECONDS`` while the human
-    completes myITS SSO inside the tool's own Firefox window.
+    re-authentication via the myITS identity-provider button
+    ("Masuk dengan myITS"; goto of the Moodle-hosted /auth/oidc/ entry if
+    the anchor is missing - never any username/password autofill) and poll
+    ``user_id()`` for ``_AUTOCLICK_POLL_SECONDS``; (3) if that fails
+    (ceiling: the SSO provider session itself is dead, so the click cannot
+    re-authenticate and one human Microsoft Authenticator push is
+    unavoidable), print the human banner and poll up to
+    ``_LOGIN_TIMEOUT_SECONDS`` while the human completes myITS SSO inside
+    the tool's own Firefox window. If the window/browser is closed early,
+    a clean ``ClassroomError`` is raised instead of a raw Playwright
+    traceback.
     """
     session = await connect(headed=headed)
     try:
@@ -130,6 +175,8 @@ async def login(headed: bool = True) -> dict[str, Any]:
             while not user_id and time.monotonic() < deadline:
                 await asyncio.sleep(_LOGIN_POLL_INTERVAL)
                 user_id = await _probe_user_id(session)
+                if not user_id and _browser_closed(session):
+                    raise ClassroomError("Browser window was closed before login completed.")
             if user_id:
                 return {
                     "ok": True,
@@ -151,12 +198,20 @@ async def login(headed: bool = True) -> dict[str, Any]:
                 raise LoginRequired("Timed out waiting for human login in the browser window.")
             await asyncio.sleep(_LOGIN_POLL_INTERVAL)
             user_id = await _probe_user_id(session)
+            if not user_id and _browser_closed(session):
+                raise ClassroomError("Browser window was closed before login completed.")
         fullname = await _fullname(session)
         return {
             "ok": True,
             "message": "Login complete. The session lives ~8h idle; activity keeps it alive.",
             "user": {"id": user_id, "fullname": fullname},
         }
+    except ClassroomError:
+        raise
+    except Exception as exc:
+        if _is_target_closed_error(exc):
+            raise ClassroomError("Browser window was closed before login completed.") from exc
+        raise
     finally:
         await session.close()
 
