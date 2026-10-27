@@ -216,12 +216,30 @@ async def login(headed: bool = True) -> dict[str, Any]:
         await session.close()
 
 
+async def _ensure_session(session: Any, timeout: float = 20.0) -> int:
+    """Ensure session is logged in, auto-reauthenticating via SSO click if needed."""
+    user_id = await _probe_user_id(session)
+    if user_id:
+        return user_id
+    if await _sso_autoclick(session):
+        deadline = time.monotonic() + timeout
+        while not user_id and time.monotonic() < deadline:
+            await asyncio.sleep(_LOGIN_POLL_INTERVAL)
+            user_id = await _probe_user_id(session)
+            if not user_id and _browser_closed(session):
+                raise ClassroomError("Browser window was closed before login completed.")
+        if user_id:
+            return user_id
+    raise LoginRequired(
+        "M.cfg.userId is 0: not logged in.",
+        hint="Run `classroom login` (headed). It opens a browser: complete myITS SSO and approve the Microsoft push once. Sessions then live ~8h idle; activity keeps them alive.",
+    )
+
+
 async def status() -> dict[str, Any]:
     session = await connect()
     try:
-        user_id = await session.user_id()
-        if not user_id:
-            raise LoginRequired("No active session; the browser window is not logged in.")
+        user_id = await _ensure_session(session, timeout=15.0)
         return {"ok": True, "logged_in": True, "user": {"id": user_id, "fullname": await _fullname(session)}}
     finally:
         await session.close()
@@ -230,6 +248,7 @@ async def status() -> dict[str, Any]:
 async def courses() -> dict[str, Any]:
     session = await connect()
     try:
+        await _ensure_session(session)
         rows = await list_courses(session)
         return {"ok": True, "count": len(rows), "courses": rows}
     finally:
@@ -239,6 +258,7 @@ async def courses() -> dict[str, Any]:
 async def assignments(course_id: int | None = None, due_within: float | None = None) -> dict[str, Any]:
     session = await connect()
     try:
+        await _ensure_session(session)
         if course_id:
             rows = await list_assignments(session, course_id)
         else:
@@ -259,6 +279,7 @@ async def submit(cmid: int, file_paths: list[str] | None = None, text: str | Non
 
     session = await connect(headed=headed)
     try:
+        await _ensure_session(session)
         result = await _submit(session, cmid=cmid, file_paths=file_paths or [], text=text, note=note)
         return {"ok": True, "cmid": cmid, **result}
     finally:
@@ -268,6 +289,7 @@ async def submit(cmid: int, file_paths: list[str] | None = None, text: str | Non
 async def materials(course_id: int) -> dict[str, Any]:
     session = await connect()
     try:
+        await _ensure_session(session)
         rows = await list_materials(session, course_id)
         return {"ok": True, "course_id": course_id, "count": len(rows), "materials": rows}
     finally:
@@ -277,6 +299,7 @@ async def materials(course_id: int) -> dict[str, Any]:
 async def download(fileurl: str, out_path: str, overwrite: bool = False) -> dict[str, Any]:
     session = await connect()
     try:
+        await _ensure_session(session)
         result = await materials_download(session, fileurl, out_path, overwrite=overwrite)
         return {"ok": True, **result}
     finally:
@@ -286,6 +309,7 @@ async def download(fileurl: str, out_path: str, overwrite: bool = False) -> dict
 async def verify(cmid: int) -> dict[str, Any]:
     session = await connect()
     try:
+        await _ensure_session(session)
         state = await submission_status(session, cmid)
         return {"ok": True, **state}
     finally:
