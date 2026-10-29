@@ -230,10 +230,7 @@ async def _ensure_session(session: Any, timeout: float = 20.0) -> int:
                 raise ClassroomError("Browser window was closed before login completed.")
         if user_id:
             return user_id
-    raise LoginRequired(
-        "M.cfg.userId is 0: not logged in.",
-        hint="Run `classroom login` (headed). It opens a browser: complete myITS SSO and approve the Microsoft push once. Sessions then live ~8h idle; activity keeps them alive.",
-    )
+    raise LoginRequired("M.cfg.userId is 0: not logged in.")
 
 
 async def status() -> dict[str, Any]:
